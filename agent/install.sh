@@ -146,6 +146,30 @@ EOF
     log_success "Caddy Docker Proxy deployed"
 }
 
+configure_firewall() {
+    log_info "Configuring firewall..."
+
+    # Install ufw if not present
+    if ! command -v ufw &> /dev/null; then
+        apt-get install -y -qq ufw
+    fi
+
+    # Allow SSH (critical - do this first!)
+    ufw allow 22/tcp >/dev/null 2>&1
+
+    # Allow HTTP and HTTPS for Caddy
+    ufw allow 80/tcp >/dev/null 2>&1
+    ufw allow 443/tcp >/dev/null 2>&1
+
+    # Allow admin panel port
+    ufw allow 3000/tcp >/dev/null 2>&1
+
+    # Enable firewall (will prompt if not already enabled)
+    ufw --force enable >/dev/null 2>&1
+
+    log_success "Firewall configured (ports 22, 80, 443, 3000)"
+}
+
 download_or_build_agent() {
     log_info "Setting up deploy-dashboard agent..."
 
@@ -310,6 +334,7 @@ print_summary() {
     echo "  - Docker Swarm (initialized)"
     echo "  - Caddy Docker Proxy (deployed)"
     echo "  - deploy-dashboard Agent (running)"
+    echo "  - Firewall (ports 22, 80, 443, 3000 open)"
     echo ""
     echo "Useful commands:"
     echo "  - Check agent status: systemctl status deploy-dashboard-agent"
@@ -352,6 +377,7 @@ main() {
     init_swarm
     install_caddy
     setup_caddy_docker_proxy
+    configure_firewall
 
     if download_or_build_agent; then
         setup_agent
