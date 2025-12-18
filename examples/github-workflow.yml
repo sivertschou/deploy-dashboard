@@ -1,0 +1,106 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix={{branch}}-
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy to VPS
+        env:
+          VIBBEKUBE_API_KEY: ${{ secrets.VIBBEKUBE_API_KEY }}
+          VIBBEKUBE_URL: ${{ secrets.VIBBEKUBE_URL }}
+          VPS_ID: ${{ secrets.VPS_ID }}
+        run: |
+          DOCKER_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+
+          cat > docker-compose.yml <<EOF
+          version: '3.8'
+
+          services:
+            app:
+              image: ${DOCKER_IMAGE}
+              networks:
+                - caddy
+              deploy:
+                replicas: 2
+                update_config:
+                  parallelism: 1
+                  delay: 10s
+                restart_policy:
+                  condition: on-failure
+                labels:
+                  caddy: myapp.example.com
+                  caddy.reverse_proxy: "{{upstreams 3000}}"
+                  caddy.tls: "internal"
+              environment:
+                - NODE_ENV=production
+                - PORT=3000
+
+          networks:
+            caddy:
+              external: true
+              name: caddy_caddy
+          EOF
+
+          COMPOSE_CONTENT=$(cat docker-compose.yml | jq -Rs .)
+
+          curl -X POST "${VIBBEKUBE_URL}/api/vps/${VPS_ID}/deploy" \
+            -H "Authorization: Bearer ${VIBBEKUBE_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"myapp\",
+              \"dockerCompose\": ${COMPOSE_CONTENT},
+              \"envVars\": {
+                \"DATABASE_URL\": \"${{ secrets.DATABASE_URL }}\",
+                \"API_KEY\": \"${{ secrets.API_KEY }}\"
+              }
+            }"
+
+      - name: Check deployment status
+        run: |
+          echo "Deployment initiated. Check the VibbeKube dashboard for status."

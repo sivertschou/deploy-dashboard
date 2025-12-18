@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  app:
+    image: your-registry/your-app:latest
+    networks:
+      - caddy
+    deploy:
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+      labels:
+        caddy: myapp.example.com
+        caddy.reverse_proxy: "{{upstreams 3000}}"
+        caddy.tls: "internal"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+
+  redis:
+    image: redis:7-alpine
+    networks:
+      - caddy
+    volumes:
+      - redis_data:/data
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+
+volumes:
+  redis_data:
+
+networks:
+  caddy:
+    external: true
+    name: caddy_caddy

@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  admin-panel:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - SESSION_SECRET=${SESSION_SECRET:-change_this_to_a_random_32_character_string}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
