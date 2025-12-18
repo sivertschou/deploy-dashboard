@@ -190,6 +190,17 @@ download_or_build_agent() {
 
     cd deploy-dashboard/agent
 
+    log_info "Initializing Go modules..."
+    # Remove go.sum to regenerate it with correct checksums
+    rm -f go.sum
+
+    # Tidy will download dependencies and regenerate go.sum with correct checksums
+    if ! go mod tidy; then
+        log_error "Failed to initialize dependencies"
+        rm -rf "$TEMP_DIR"
+        return 1
+    fi
+
     log_info "Building agent..."
     if ! go build -o deploy-dashboard-agent main.go; then
         log_error "Failed to build agent"

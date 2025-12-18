@@ -71,7 +71,6 @@ agent/deploy-dashboard-agent-*
 agent/dist/
 
 # Go
-agent/go.sum
 *.test
 *.out
 vendor/
