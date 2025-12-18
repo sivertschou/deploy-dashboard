@@ -146,28 +146,190 @@ EOF
     log_success "Caddy Docker Proxy deployed"
 }
 
+deploy_admin_panel() {
+    log_info "Deploying admin panel..."
+
+    # Install git if not present
+    if ! command -v git &> /dev/null; then
+        log_info "Installing git..."
+        apt-get update -qq
+        apt-get install -y -qq git
+    fi
+
+    # Check if Node.js is installed
+    if ! command -v node &> /dev/null; then
+        log_info "Installing Node.js 20.x..."
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+        apt-get install -y nodejs
+
+        # Verify installation
+        if ! command -v node &> /dev/null; then
+            log_error "Failed to install Node.js"
+            return 1
+        fi
+        log_success "Node.js $(node --version) installed"
+    else
+        log_info "Node.js $(node --version) already installed"
+    fi
+
+    # Create directory for admin panel
+    ADMIN_DIR="/opt/deploy-dashboard-admin"
+
+    # Remove old installation if exists
+    if [ -d "$ADMIN_DIR" ]; then
+        log_info "Removing old admin panel installation..."
+        rm -rf "$ADMIN_DIR"
+    fi
+
+    mkdir -p "$ADMIN_DIR"
+
+    # Clone repository
+    log_info "Cloning repository..."
+    if ! git clone https://github.com/sivertschou/deploy-dashboard.git "$ADMIN_DIR" 2>&1; then
+        log_error "Failed to clone repository"
+        return 1
+    fi
+
+    cd "$ADMIN_DIR/admin-panel" || {
+        log_error "Failed to change to admin-panel directory"
+        return 1
+    }
+
+    # Install dependencies
+    log_info "Installing admin panel dependencies (this may take a few minutes)..."
+    if ! npm install 2>&1; then
+        log_error "Failed to install dependencies"
+        log_info "Check npm logs above for details"
+        return 1
+    fi
+
+    # Generate session secret
+    SESSION_SECRET=$(openssl rand -hex 32)
+
+    # Create .env file
+    log_info "Creating environment configuration..."
+    cat > .env <<EOF
+SESSION_SECRET=${SESSION_SECRET}
+NODE_ENV=production
+PORT=3000
+EOF
+
+    chmod 600 .env
+
+    # Build the application
+    log_info "Building admin panel (this may take a few minutes)..."
+    if ! npm run build 2>&1; then
+        log_error "Failed to build admin panel"
+        log_info "Check build output above for errors"
+        return 1
+    fi
+
+    # Create systemd service
+    log_info "Creating systemd service..."
+    cat > /etc/systemd/system/deploy-dashboard-admin.service <<EOF
+[Unit]
+Description=deploy-dashboard Admin Panel
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$ADMIN_DIR/admin-panel
+Environment="NODE_ENV=production"
+EnvironmentFile=$ADMIN_DIR/admin-panel/.env
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=deploy-dashboard-admin
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Start the service
+    log_info "Starting admin panel service..."
+    systemctl daemon-reload
+    systemctl enable deploy-dashboard-admin
+    systemctl start deploy-dashboard-admin
+
+    # Wait a moment for it to start
+    sleep 5
+
+    # Check if it's running
+    if systemctl is-active --quiet deploy-dashboard-admin; then
+        log_success "Admin panel service is running"
+
+        # Wait a bit more for it to bind to port
+        sleep 3
+
+        # Install net-tools if netstat is not available
+        if ! command -v netstat &> /dev/null; then
+            apt-get install -y -qq net-tools
+        fi
+
+        # Verify it's listening
+        if netstat -tlnp 2>/dev/null | grep -q ":3000"; then
+            log_success "Admin panel is listening on port 3000"
+        else
+            log_error "Admin panel service is running but not listening on port 3000"
+            log_info "Waiting 10 more seconds for startup..."
+            sleep 10
+            if netstat -tlnp 2>/dev/null | grep -q ":3000"; then
+                log_success "Admin panel is now listening on port 3000"
+            else
+                log_error "Admin panel still not listening on port 3000"
+                log_info "Check logs with: journalctl -u deploy-dashboard-admin -f"
+                log_info "Recent logs:"
+                journalctl -u deploy-dashboard-admin -n 20 --no-pager
+            fi
+        fi
+    else
+        log_error "Admin panel failed to start"
+        log_info "Service status:"
+        systemctl status deploy-dashboard-admin --no-pager
+        log_info ""
+        log_info "Recent logs:"
+        journalctl -u deploy-dashboard-admin -n 50 --no-pager
+        return 1
+    fi
+
+    return 0
+}
+
 configure_firewall() {
     log_info "Configuring firewall..."
 
     # Install ufw if not present
     if ! command -v ufw &> /dev/null; then
+        log_info "Installing UFW firewall..."
         apt-get install -y -qq ufw
     fi
 
     # Allow SSH (critical - do this first!)
+    log_info "Opening port 22 (SSH)..."
     ufw allow 22/tcp >/dev/null 2>&1
 
     # Allow HTTP and HTTPS for Caddy
+    log_info "Opening ports 80/443 (HTTP/HTTPS)..."
     ufw allow 80/tcp >/dev/null 2>&1
     ufw allow 443/tcp >/dev/null 2>&1
 
     # Allow admin panel port
+    log_info "Opening port 3000 (Admin Panel)..."
     ufw allow 3000/tcp >/dev/null 2>&1
 
     # Enable firewall (will prompt if not already enabled)
+    log_info "Enabling firewall..."
     ufw --force enable >/dev/null 2>&1
 
-    log_success "Firewall configured (ports 22, 80, 443, 3000)"
+    log_success "Firewall configured and enabled"
+
+    # Show firewall status
+    echo ""
+    ufw status | grep -E "Status:|22|80|443|3000" || true
+    echo ""
 }
 
 download_or_build_agent() {
@@ -333,10 +495,13 @@ print_summary() {
     echo "  - Docker $(docker --version | awk '{print $3}')"
     echo "  - Docker Swarm (initialized)"
     echo "  - Caddy Docker Proxy (deployed)"
+    echo "  - Admin Panel (running on port 3000)"
     echo "  - deploy-dashboard Agent (running)"
     echo "  - Firewall (ports 22, 80, 443, 3000 open)"
     echo ""
     echo "Useful commands:"
+    echo "  - Check admin panel: systemctl status deploy-dashboard-admin"
+    echo "  - View admin logs: journalctl -u deploy-dashboard-admin -f"
     echo "  - Check agent status: systemctl status deploy-dashboard-agent"
     echo "  - View agent logs: journalctl -u deploy-dashboard-agent -f"
     echo "  - View Caddy logs: docker service logs caddy_caddy"
@@ -346,17 +511,17 @@ print_summary() {
     echo "Next Steps:"
     echo "=========================================="
     echo ""
-    echo "1. Open your admin dashboard:"
+    echo "1. Open your admin dashboard in your browser:"
     echo ""
     echo "   http://${VPS_IP}:3000"
     echo ""
-    echo "   (You can configure a custom domain later in the dashboard)"
-    echo ""
-    echo "2. Sign in or register (first user becomes admin)"
+    echo "2. Register your account (first user becomes admin)"
     echo ""
     echo "3. Your VPS should appear as 'online' in the dashboard"
     echo ""
-    echo "4. Start deploying your applications!"
+    echo "4. Configure a custom domain (optional)"
+    echo ""
+    echo "5. Start deploying your applications!"
     echo ""
     echo "=========================================="
     echo ""
@@ -377,6 +542,7 @@ main() {
     init_swarm
     install_caddy
     setup_caddy_docker_proxy
+    deploy_admin_panel
     configure_firewall
 
     if download_or_build_agent; then
