@@ -146,8 +146,8 @@ EOF
     log_success "Caddy Docker Proxy deployed"
 }
 
-download_agent() {
-    log_info "Downloading deploy-dashboard agent..."
+download_or_build_agent() {
+    log_info "Setting up deploy-dashboard agent..."
 
     ARCH=$(uname -m)
     if [ "$ARCH" = "x86_64" ]; then
@@ -159,17 +159,51 @@ download_agent() {
     AGENT_VERSION="latest"
     DOWNLOAD_URL="https://github.com/sivertschou/deploy-dashboard/releases/download/${AGENT_VERSION}/deploy-dashboard-agent-linux-${ARCH}"
 
+    # Try to download pre-built binary
     if curl -f -L -o /tmp/deploy-dashboard-agent "$DOWNLOAD_URL" 2>/dev/null; then
         log_success "Agent downloaded successfully"
-    else
-        log_info "Pre-built binary not available. Please compile the agent manually."
-        log_info "Skipping agent installation. You can compile it with: go build -o deploy-dashboard-agent main.go"
+        chmod +x /tmp/deploy-dashboard-agent
+        mv /tmp/deploy-dashboard-agent /usr/local/bin/deploy-dashboard-agent
+        return 0
+    fi
+
+    # If download fails, build from source
+    log_info "Pre-built binary not available. Building from source..."
+
+    # Install required tools
+    if ! command -v go &> /dev/null || ! command -v git &> /dev/null; then
+        log_info "Installing build dependencies..."
+        apt-get update -qq
+        apt-get install -y -qq golang-go git
+    fi
+
+    # Clone repository and build
+    TEMP_DIR=$(mktemp -d)
+    cd "$TEMP_DIR"
+
+    log_info "Cloning repository..."
+    if ! git clone https://github.com/sivertschou/deploy-dashboard.git 2>/dev/null; then
+        log_error "Failed to clone repository. Please check your internet connection."
+        rm -rf "$TEMP_DIR"
         return 1
     fi
 
-    chmod +x /tmp/deploy-dashboard-agent
-    mv /tmp/deploy-dashboard-agent /usr/local/bin/deploy-dashboard-agent
+    cd deploy-dashboard/agent
 
+    log_info "Building agent..."
+    if ! go build -o deploy-dashboard-agent main.go; then
+        log_error "Failed to build agent"
+        rm -rf "$TEMP_DIR"
+        return 1
+    fi
+
+    mv deploy-dashboard-agent /usr/local/bin/
+    chmod +x /usr/local/bin/deploy-dashboard-agent
+
+    cd /
+    rm -rf "$TEMP_DIR"
+
+    log_success "Agent built and installed successfully"
     return 0
 }
 
@@ -178,19 +212,33 @@ setup_agent() {
 
     mkdir -p /etc/deploy-dashboard-agent
 
+    # Auto-detect VPS IP address
+    VPS_IP=$(hostname -I | awk '{print $1}')
+
+    # Check if admin panel is running locally
+    ADMIN_PANEL_URL="http://localhost:3000"
+    if curl -s -f "$ADMIN_PANEL_URL/api/auth/me" >/dev/null 2>&1; then
+        log_info "Detected admin panel running locally on port 3000"
+    else
+        # Try public IP
+        ADMIN_PANEL_URL="http://$VPS_IP:3000"
+        log_info "Using admin panel URL: $ADMIN_PANEL_URL"
+    fi
+
     echo ""
     echo "==================================="
     echo "deploy-dashboard Agent Configuration"
     echo "==================================="
     echo ""
+    echo "Admin Panel URL: $ADMIN_PANEL_URL"
+    echo ""
 
-    read -p "Enter Admin Panel URL (e.g., https://admin.example.com): " ADMIN_URL
     read -p "Enter VPS ID (from admin panel): " VPS_ID
     read -p "Enter API Key (from admin panel): " API_KEY
 
     cat > /etc/deploy-dashboard-agent/config.json <<EOF
 {
-  "AdminPanelURL": "${ADMIN_URL}",
+  "AdminPanelURL": "${ADMIN_PANEL_URL}",
   "VPSID": "${VPS_ID}",
   "APIKey": "${API_KEY}",
   "ReportInterval": 30
@@ -238,10 +286,13 @@ test_connection() {
 }
 
 print_summary() {
+    # Get public IP for display
+    VPS_IP=$(hostname -I | awk '{print $1}')
+
     echo ""
-    echo "==================================="
-    echo "Installation Complete!"
-    echo "==================================="
+    echo "=========================================="
+    echo "✓ Installation Complete!"
+    echo "=========================================="
     echo ""
     echo "Services installed:"
     echo "  - Docker $(docker --version | awk '{print $3}')"
@@ -254,6 +305,24 @@ print_summary() {
     echo "  - View agent logs: journalctl -u deploy-dashboard-agent -f"
     echo "  - View Caddy logs: docker service logs caddy_caddy"
     echo "  - List Docker services: docker service ls"
+    echo ""
+    echo "=========================================="
+    echo "Next Steps:"
+    echo "=========================================="
+    echo ""
+    echo "1. Open your admin dashboard:"
+    echo ""
+    echo "   http://${VPS_IP}:3000"
+    echo ""
+    echo "   (You can configure a custom domain later in the dashboard)"
+    echo ""
+    echo "2. Sign in or register (first user becomes admin)"
+    echo ""
+    echo "3. Your VPS should appear as 'online' in the dashboard"
+    echo ""
+    echo "4. Start deploying your applications!"
+    echo ""
+    echo "=========================================="
     echo ""
     log_success "Installation successful!"
 }
@@ -273,18 +342,13 @@ main() {
     install_caddy
     setup_caddy_docker_proxy
 
-    if download_agent; then
+    if download_or_build_agent; then
         setup_agent
         test_connection
         print_summary
     else
-        log_info "Agent binary not available. Manual compilation required."
-        echo ""
-        echo "To compile and install manually:"
-        echo "1. Install Go: apt-get install golang-go"
-        echo "2. Compile: go build -o deploy-dashboard-agent main.go"
-        echo "3. Move binary: mv deploy-dashboard-agent /usr/local/bin/"
-        echo "4. Run this script again"
+        log_error "Failed to install agent. Please check the logs above."
+        exit 1
     fi
 }
 
